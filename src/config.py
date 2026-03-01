@@ -22,7 +22,12 @@ USER_AGENT = (
 # LLM (ModelScope OpenAI-compatible API)
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 LLM_BASE_URL = "https://api-inference.modelscope.cn/v1/"
-LLM_MODEL = "ZhipuAI/GLM-5"
+LLM_MODELS = [
+    "ZhipuAI/GLM-5",
+    "MiniMax/MiniMax-M2.5",
+    "deepseek-ai/DeepSeek-V3.2",
+    "ZhipuAI/GLM-4.7",
+]
 
 # QQ SMTP
 SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")

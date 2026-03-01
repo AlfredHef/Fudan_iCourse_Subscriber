@@ -39,6 +39,19 @@ class Database:
                     FOREIGN KEY (course_id) REFERENCES courses(course_id)
                 )
             """)
+            # Migrate: add error tracking and summary_model columns
+            existing = {
+                row[1]
+                for row in self.conn.execute("PRAGMA table_info(lectures)").fetchall()
+            }
+            for col, typedef in [
+                ("error_msg", "TEXT"),
+                ("error_count", "INTEGER DEFAULT 0"),
+                ("error_stage", "TEXT"),
+                ("summary_model", "TEXT"),
+            ]:
+                if col not in existing:
+                    self.conn.execute(f"ALTER TABLE lectures ADD COLUMN {col} {typedef}")
 
     def upsert_course(self, course_id: str, title: str, teacher: str):
         with self.conn:
@@ -120,3 +133,51 @@ class Database:
                 "UPDATE lectures SET emailed_at = ? WHERE sub_id = ?",
                 [(now, sid) for sid in sub_ids],
             )
+
+    def update_error(self, sub_id: str, stage: str, error_msg: str):
+        """Record a processing error for a lecture."""
+        with self.conn:
+            self.conn.execute(
+                """UPDATE lectures
+                   SET error_stage = ?, error_msg = ?,
+                       error_count = COALESCE(error_count, 0) + 1
+                   WHERE sub_id = ?""",
+                (stage, error_msg, sub_id),
+            )
+
+    def clear_error(self, sub_id: str):
+        """Clear error state after successful processing."""
+        with self.conn:
+            self.conn.execute(
+                """UPDATE lectures
+                   SET error_stage = NULL, error_msg = NULL, error_count = 0
+                   WHERE sub_id = ?""",
+                (sub_id,),
+            )
+
+    def update_summary_with_model(self, sub_id: str, summary: str, model: str):
+        """Save summary and the model that produced it."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE lectures SET summary = ?, summary_model = ? WHERE sub_id = ?",
+                (summary, model, sub_id),
+            )
+
+    def get_lecture(self, sub_id: str) -> dict | None:
+        """Get a single lecture row by sub_id."""
+        row = self.conn.execute(
+            "SELECT * FROM lectures WHERE sub_id = ?", (sub_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_unsent_lectures(self) -> list[dict]:
+        """Find lectures that are processed but not yet emailed."""
+        rows = self.conn.execute(
+            """SELECT l.*, c.title AS course_title, c.teacher
+               FROM lectures l
+               JOIN courses c ON l.course_id = c.course_id
+               WHERE l.processed_at IS NOT NULL
+                 AND l.emailed_at IS NULL
+                 AND l.summary IS NOT NULL""",
+        ).fetchall()
+        return [dict(row) for row in rows]

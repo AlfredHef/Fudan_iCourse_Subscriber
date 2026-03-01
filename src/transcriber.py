@@ -16,6 +16,7 @@ class Transcriber:
     def __init__(self):
         self._recognizer = None
         self._vad = None
+        self._vad_config = None
 
     def _init(self):
         if self._recognizer is not None:
@@ -42,12 +43,18 @@ class Transcriber:
             debug=False,
         )
 
-        vad_config = sherpa_onnx.VadModelConfig()
-        vad_config.silero_vad.model = vad_path
-        vad_config.silero_vad.min_silence_duration = 0.25
-        vad_config.sample_rate = 16000
-        self._vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=120)
+        self._vad_config = sherpa_onnx.VadModelConfig()
+        self._vad_config.silero_vad.model = vad_path
+        self._vad_config.silero_vad.min_silence_duration = 0.25
+        self._vad_config.sample_rate = 16000
+        self._reset_vad()
         print("[Transcriber] Model loaded.")
+
+    def _reset_vad(self):
+        """Re-create VAD to reset internal counters (prevents INT32 overflow)."""
+        self._vad = sherpa_onnx.VoiceActivityDetector(
+            self._vad_config, buffer_size_in_seconds=120
+        )
 
     def _drain_segments(self, texts: list[str]):
         """Recognize and collect all complete speech segments from VAD."""
@@ -61,27 +68,17 @@ class Transcriber:
             if text:
                 texts.append(text)
 
-    def transcribe_video(self, video_path: str) -> str:
-        """Transcribe a video file directly via ffmpeg pipe.
+    def _transcribe_from_cmd(self, cmd: list[str], timeout: int = 7200) -> str:
+        """Shared transcription logic: run ffmpeg cmd, feed VAD, return text.
 
-        ffmpeg decodes video → 16kHz mono PCM stream
-        → silero VAD splits into speech segments
-        → SenseVoice recognizes each segment
-        → returns concatenated text.
+        Args:
+            cmd: ffmpeg command list.
+            timeout: Max seconds before killing the process.
         """
         self._init()
+        self._reset_vad()
         t0 = time.time()
 
-        # Drain any leftover VAD state from a previous (possibly failed) call
-        self._vad.flush()
-        while not self._vad.empty():
-            self._vad.pop()
-
-        cmd = [
-            "ffmpeg", "-i", video_path,
-            "-ar", "16000", "-ac", "1",
-            "-f", "f32le", "-"
-        ]
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
@@ -94,36 +91,72 @@ class Transcriber:
         texts = []
         total_read = 0
 
-        while True:
-            raw = proc.stdout.read(chunk_size * bytes_per_sample)
-            if not raw:
-                break
+        try:
+            while True:
+                if time.time() - t0 > timeout:
+                    proc.kill()
+                    proc.wait()
+                    raise TimeoutError(
+                        f"Transcription timed out after {timeout}s"
+                    )
 
-            samples = np.frombuffer(raw, dtype=np.float32)
-            total_read += len(samples)
+                raw = proc.stdout.read(chunk_size * bytes_per_sample)
+                if not raw:
+                    break
 
-            # Feed samples to VAD in window-sized chunks
-            idx = 0
-            while idx + window_size <= len(samples):
-                self._vad.accept_waveform(samples[idx:idx + window_size])
-                idx += window_size
+                samples = np.frombuffer(raw, dtype=np.float32)
+                total_read += len(samples)
 
-                # Process any complete speech segments
-                self._drain_segments(texts)
+                # Feed samples to VAD in window-sized chunks
+                idx = 0
+                while idx + window_size <= len(samples):
+                    self._vad.accept_waveform(samples[idx:idx + window_size])
+                    idx += window_size
+                    self._drain_segments(texts)
 
-            # Handle remaining samples (less than window_size)
-            if idx < len(samples):
-                self._vad.accept_waveform(samples[idx:])
+                # Handle remaining samples (less than window_size)
+                if idx < len(samples):
+                    self._vad.accept_waveform(samples[idx:])
 
-        # Flush VAD
-        self._vad.flush()
-        self._drain_segments(texts)
+            # Flush VAD
+            self._vad.flush()
+            self._drain_segments(texts)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
 
-        proc.wait()
-        if proc.returncode != 0:
+        if proc.returncode not in (0, -9, None):
             raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
+
         elapsed = time.time() - t0
         duration = total_read / sample_rate
         transcript = " ".join(texts)
-        print(f"[Transcriber] Done: {duration:.0f}s audio, {len(transcript)} chars, {len(texts)} segments in {elapsed:.0f}s")
+        print(
+            f"[Transcriber] Done: {duration:.0f}s audio, {len(transcript)} chars,"
+            f" {len(texts)} segments in {elapsed:.0f}s"
+        )
         return transcript
+
+    def transcribe_video(self, video_path: str) -> str:
+        """Transcribe a local video file via ffmpeg pipe."""
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-ar", "16000", "-ac", "1",
+            "-f", "f32le", "-",
+        ]
+        return self._transcribe_from_cmd(cmd)
+
+    def transcribe_url(self, url: str, timeout: int = 7200) -> str:
+        """Stream audio directly from a CDN URL (no video download needed)."""
+        cmd = [
+            "ffmpeg",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-i", url,
+            "-vn",
+            "-ar", "16000", "-ac", "1",
+            "-f", "f32le", "-",
+        ]
+        return self._transcribe_from_cmd(cmd, timeout=timeout)

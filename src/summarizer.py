@@ -30,34 +30,48 @@ class Summarizer:
             api_key=config.DASHSCOPE_API_KEY,
             base_url=config.LLM_BASE_URL,
         )
-        self.model = config.LLM_MODEL
+        self.models = list(config.LLM_MODELS)
 
-    def summarize(self, title: str, content: str) -> str:
-        """Summarize lecture content.
+    def summarize(self, title: str, content: str) -> tuple[str, str]:
+        """Summarize lecture content, trying multiple models on failure.
 
         Args:
             title: Lecture title for context.
             content: Full transcript text.
 
         Returns:
-            Markdown-formatted summary string.
+            (summary, model_used) tuple.
         """
         if not content or not content.strip():
-            return "（内容为空）"
+            return ("（内容为空）", "")
 
-        t0 = time.time()
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"以下是课程《{title}》的录音文本，请总结：\n\n{content}",
-                },
-            ],
-            temperature=0.3,
+        errors = []
+        for model in self.models:
+            try:
+                t0 = time.time()
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": f"以下是课程《{title}》的录音文本，请总结：\n\n{content}",
+                        },
+                    ],
+                    temperature=0.3,
+                    timeout=120,
+                )
+                result = response.choices[0].message.content
+                elapsed = time.time() - t0
+                print(
+                    f"[Summarizer] Done ({model}): {len(content)} chars input"
+                    f" → {len(result)} chars output in {elapsed:.0f}s"
+                )
+                return (result, model)
+            except Exception as e:
+                print(f"[Summarizer] {model} failed: {type(e).__name__}: {e}")
+                errors.append(f"{model}: {e}")
+
+        raise RuntimeError(
+            "All LLM models failed:\n" + "\n".join(errors)
         )
-        result = response.choices[0].message.content
-        elapsed = time.time() - t0
-        print(f"[Summarizer] Done: {len(content)} chars input → {len(result)} chars output in {elapsed:.0f}s")
-        return result

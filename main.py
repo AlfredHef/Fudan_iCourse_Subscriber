@@ -1,10 +1,9 @@
 """iCourse Subscriber — main orchestration.
 
-Runs a single check: login → detect new lectures → download → transcribe
+Runs a single check: login → detect new lectures → stream audio → transcribe
 → summarize → email. Designed to be triggered by GitHub Actions cron.
 """
 
-import os
 import time
 import traceback
 
@@ -28,6 +27,9 @@ def process_lecture(
 ) -> str | None:
     """Download, transcribe, and summarize a single lecture.
 
+    Supports stage-skipping: if a previous run already produced a transcript
+    or summary, that stage is not repeated.
+
     Returns the summary string, or None if no summary was produced.
     """
     sub_id = str(lecture["sub_id"])
@@ -37,41 +39,50 @@ def process_lecture(
     print(f"\n  -- Processing: {sub_title} ({date})")
     t_start = time.time()
 
-    # 1) Download video
-    video_url = client.get_video_url(course_id, sub_id)
-    if not video_url:
-        print(f"    No video URL for {sub_id}, skipping.")
-        return None
+    # Check existing progress for stage-skipping
+    existing = db.get_lecture(sub_id)
+    has_transcript = existing and existing.get("transcript")
+    has_summary = existing and existing.get("summary")
 
-    video_dir = os.path.join(config.VIDEO_DIR, course_id)
-    video_path = os.path.join(video_dir, f"{sub_id}.mp4")
-    os.makedirs(video_dir, exist_ok=True)
+    # 1) Transcribe (stream audio directly from CDN — no video download)
+    if has_transcript:
+        print(f"    Transcript exists, skipping transcription.")
+        transcript = existing["transcript"]
+    else:
+        video_url = client.get_video_url(course_id, sub_id)
+        if not video_url:
+            print(f"    No video URL for {sub_id}, skipping.")
+            return None
 
-    if not os.path.exists(video_path):
-        print(f"    Downloading video...")
-        client.download_video(video_url, video_path)
+        try:
+            print(f"    Streaming audio & transcribing...")
+            transcript = transcriber.transcribe_url(video_url)
+            db.update_transcript(sub_id, transcript)
+        except Exception as e:
+            db.update_error(sub_id, "transcribe", str(e))
+            raise
 
-    # 2) Transcribe via ffmpeg pipe + SenseVoice
-    print(f"    Transcribing...")
-    transcript = transcriber.transcribe_video(video_path)
-    db.update_transcript(sub_id, transcript)
-
-    # 3) Delete video to save disk
-    if os.path.exists(video_path):
-        os.remove(video_path)
-        print(f"    Video deleted.")
-
-    # 4) Summarize
+    # 2) Summarize
     if not transcript.strip():
         print(f"    Empty transcript, skipping summary.")
         db.mark_processed(sub_id)
+        db.clear_error(sub_id)
         return None
 
-    print(f"    Generating summary...")
-    summary = summarizer.summarize(course_title, transcript)
-    db.update_summary(sub_id, summary)
+    if has_summary:
+        print(f"    Summary exists, skipping summarization.")
+        summary = existing["summary"]
+    else:
+        try:
+            print(f"    Generating summary...")
+            summary, model_used = summarizer.summarize(course_title, transcript)
+            db.update_summary_with_model(sub_id, summary, model_used)
+        except Exception as e:
+            db.update_error(sub_id, "summarize", str(e))
+            raise
 
     db.mark_processed(sub_id)
+    db.clear_error(sub_id)
     elapsed = time.time() - t_start
     print(f"    Done: {sub_title} (total {elapsed:.0f}s)")
     return summary
@@ -191,12 +202,29 @@ def run():
             print(f"  ERROR processing course {course_id}:")
             traceback.print_exc()
 
+    # Recover any previously processed-but-unsent lectures
+    unsent = db.get_unsent_lectures()
+    if unsent:
+        seen_sub_ids = {item["sub_id"] for item in email_items}
+        for row in unsent:
+            if row["sub_id"] not in seen_sub_ids:
+                email_items.append({
+                    "sub_id": row["sub_id"],
+                    "course_title": row["course_title"],
+                    "sub_title": row["sub_title"],
+                    "date": row["date"],
+                    "summary": row["summary"],
+                })
+        print(f"[Email] Including {len(unsent)} previously unsent lecture(s).")
+
     # Send one email with all summaries
     if emailer and email_items:
         try:
             print(f"\n[Email] Sending summary for {len(email_items)} lecture(s)...")
-            emailer.send(email_items)
-            db.mark_emailed_batch([item["sub_id"] for item in email_items])
+            if emailer.send(email_items):
+                db.mark_emailed_batch([item["sub_id"] for item in email_items])
+            else:
+                print("[Email] Send failed, lectures will be retried next run.")
         except Exception:
             print("[Email] Failed to send:")
             traceback.print_exc()

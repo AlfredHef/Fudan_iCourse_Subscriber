@@ -1,11 +1,14 @@
 """Email notification via QQ SMTP."""
 
+import re
 import smtplib
+import time
 from collections import OrderedDict
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
 from email.utils import formataddr
+from urllib.parse import quote
 
 import markdown
 
@@ -95,6 +98,41 @@ def _md_to_html(md_text: str) -> str:
     return markdown.markdown(md_text, extensions=_MD_EXTENSIONS)
 
 
+def _latex_to_img_html(html: str) -> str:
+    """Replace LaTeX math expressions with rendered <img> tags.
+
+    Skips content inside <code> and <pre> tags.
+    $$...$$ → centered block image, $...$ → inline image.
+    """
+    # Split HTML to skip code/pre blocks
+    parts = re.split(r"(<code>.*?</code>|<pre>.*?</pre>)", html, flags=re.DOTALL)
+    for i, part in enumerate(parts):
+        if part.startswith("<code>") or part.startswith("<pre>"):
+            continue
+        # Block math: $$...$$
+        part = re.sub(
+            r"\$\$(.+?)\$\$",
+            lambda m: (
+                f'<div style="text-align:center;margin:12px 0">'
+                f'<img src="https://latex.codecogs.com/svg.latex?{quote(m.group(1))}"'
+                f' alt="{escape(m.group(1))}" style="vertical-align:middle"></div>'
+            ),
+            part,
+            flags=re.DOTALL,
+        )
+        # Inline math: $...$
+        part = re.sub(
+            r"\$(.+?)\$",
+            lambda m: (
+                f'<img src="https://latex.codecogs.com/svg.latex?\\inline%20{quote(m.group(1))}"'
+                f' alt="{escape(m.group(1))}" style="vertical-align:middle">'
+            ),
+            part,
+        )
+        parts[i] = part
+    return "".join(parts)
+
+
 class Emailer:
     """Send course summary emails via QQ SMTP SSL."""
 
@@ -105,15 +143,18 @@ class Emailer:
         self.password = config.SMTP_PASSWORD
         self.receiver = config.RECEIVER_EMAIL
 
-    def send(self, items: list[dict]):
+    def send(self, items: list[dict]) -> bool:
         """Send a single email containing all lecture summaries.
 
         Args:
             items: List of dicts, each with keys:
                    course_title, sub_title, date, summary
+
+        Returns:
+            True if email was sent successfully, False otherwise.
         """
         if not items:
-            return
+            return True
 
         # Group by course (preserve insertion order)
         courses: OrderedDict[str, list[dict]] = OrderedDict()
@@ -137,7 +178,7 @@ class Emailer:
                 plain_sections.append(lec["summary"])
         plain = "\n".join(plain_sections)
 
-        # HTML (Markdown → styled HTML)
+        # HTML (Markdown → styled HTML with LaTeX rendering)
         body_parts = []
         for course_title, lectures in courses.items():
             body_parts.append(f"<h2>{escape(course_title)}</h2>")
@@ -146,7 +187,7 @@ class Emailer:
                     f"<h3>{escape(lec['sub_title'])} "
                     f"<small>({escape(lec['date'])})</small></h3>"
                 )
-                body_parts.append(_md_to_html(lec["summary"]))
+                body_parts.append(_latex_to_img_html(_md_to_html(lec["summary"])))
                 body_parts.append("<hr>")
 
         html = (
@@ -165,8 +206,18 @@ class Emailer:
         msg.attach(MIMEText(plain, "plain", "utf-8"))
         msg.attach(MIMEText(html, "html", "utf-8"))
 
-        with smtplib.SMTP_SSL(self.host, self.port) as server:
-            server.login(self.sender, self.password)
-            server.sendmail(self.sender, self.receiver, msg.as_string())
+        # Retry with exponential backoff
+        for attempt in range(3):
+            try:
+                with smtplib.SMTP_SSL(self.host, self.port) as server:
+                    server.login(self.sender, self.password)
+                    server.sendmail(self.sender, self.receiver, msg.as_string())
+                print(f"[Emailer] Sent: {subject}")
+                return True
+            except Exception as e:
+                print(f"[Emailer] Attempt {attempt + 1}/3 failed: {e}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
 
-        print(f"[Emailer] Sent: {subject}")
+        print("[Emailer] All send attempts failed.")
+        return False

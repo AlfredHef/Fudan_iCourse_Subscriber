@@ -13,93 +13,47 @@ from . import config
 
 
 class Transcriber:
-    """SenseVoice-based transcriber with VAD segmentation.
-
-    Thread-safe: the heavy recognizer model is loaded once and shared across
-    threads, while VAD state and per-transcription metrics are stored in
-    ``threading.local()`` so each worker thread gets its own copy.
-    """
+    """SenseVoice-based transcriber with VAD segmentation."""
 
     def __init__(self):
         self._recognizer = None
+        self._vad = None
         self._vad_config = None
-        self._init_lock = threading.Lock()
-        self._local = threading.local()
-
-    # -- thread-local properties ------------------------------------------
-
-    @property
-    def _vad(self):
-        return getattr(self._local, "vad", None)
-
-    @_vad.setter
-    def _vad(self, value):
-        self._local.vad = value
-
-    @property
-    def _last_duration(self):
-        return getattr(self._local, "last_duration", 0.0)
-
-    @_last_duration.setter
-    def _last_duration(self, value):
-        self._local.last_duration = value
-
-    @property
-    def _last_transcript(self):
-        return getattr(self._local, "last_transcript", "")
-
-    @_last_transcript.setter
-    def _last_transcript(self, value):
-        self._local.last_transcript = value
-
-    @property
-    def _media_duration(self):
-        return getattr(self._local, "media_duration", None)
-
-    @_media_duration.setter
-    def _media_duration(self, value):
-        self._local.media_duration = value
-
-    @property
-    def last_transcript(self):
-        """Public access to the transcript from the most recent transcription
-        on the *current* thread.  Used as a fallback when all retry attempts
-        for incomplete audio fail."""
-        return self._last_transcript
-
-    # -- initialisation ---------------------------------------------------
+        self._last_duration = 0.0  # audio seconds from last transcription
+        self._last_transcript = ""  # transcript from last transcription
+        self._media_duration = None  # total media duration parsed from ffmpeg stderr
 
     def _init(self):
-        with self._init_lock:
-            if self._recognizer is not None:
-                return
+        if self._recognizer is not None:
+            return
 
-            model_dir = config.SENSEVOICE_MODEL_DIR
-            model_path = os.path.join(model_dir, "model.int8.onnx")
-            tokens_path = os.path.join(model_dir, "tokens.txt")
-            vad_path = config.SILERO_VAD_PATH
+        model_dir = config.SENSEVOICE_MODEL_DIR
+        model_path = os.path.join(model_dir, "model.int8.onnx")
+        tokens_path = os.path.join(model_dir, "tokens.txt")
+        vad_path = config.SILERO_VAD_PATH
 
-            for p, name in [(model_path, "SenseVoice model"), (tokens_path, "tokens.txt"), (vad_path, "silero_vad.onnx")]:
-                if not os.path.isfile(p):
-                    raise FileNotFoundError(
-                        f"{name} not found at '{p}'. "
-                        f"Download from https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models"
-                    )
+        for p, name in [(model_path, "SenseVoice model"), (tokens_path, "tokens.txt"), (vad_path, "silero_vad.onnx")]:
+            if not os.path.isfile(p):
+                raise FileNotFoundError(
+                    f"{name} not found at '{p}'. "
+                    f"Download from https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models"
+                )
 
-            print("[Transcriber] Loading SenseVoice model...")
-            self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-                model=model_path,
-                tokens=tokens_path,
-                use_itn=True,
-                num_threads=2,
-                debug=False,
-            )
+        print("[Transcriber] Loading SenseVoice model...")
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=model_path,
+            tokens=tokens_path,
+            use_itn=True,
+            num_threads=2,
+            debug=False,
+        )
 
-            self._vad_config = sherpa_onnx.VadModelConfig()
-            self._vad_config.silero_vad.model = vad_path
-            self._vad_config.silero_vad.min_silence_duration = 0.25
-            self._vad_config.sample_rate = 16000
-            print("[Transcriber] Model loaded.")
+        self._vad_config = sherpa_onnx.VadModelConfig()
+        self._vad_config.silero_vad.model = vad_path
+        self._vad_config.silero_vad.min_silence_duration = 0.25
+        self._vad_config.sample_rate = 16000
+        self._reset_vad()
+        print("[Transcriber] Model loaded.")
 
     def _reset_vad(self):
         """Re-create VAD to reset internal counters (prevents INT32 overflow)."""
@@ -119,21 +73,17 @@ class Transcriber:
             if text:
                 texts.append(text)
 
-    def _transcribe_from_cmd(self, cmd: list[str], timeout: int = 7200,
-                             label: str = "") -> str:
+    def _transcribe_from_cmd(self, cmd: list[str], timeout: int = 7200) -> str:
         """Shared transcription logic: run ffmpeg cmd, feed VAD, return text.
 
         Args:
             cmd: ffmpeg command list.
             timeout: Max seconds before killing the process.
-            label: Optional identifier included in progress output so that
-                   concurrent runs can be distinguished.
         """
         self._init()
         self._reset_vad()
         t0 = time.time()
-        tag = f"[Transcriber/{label}]" if label else "[Transcriber]"
-        print(f"{tag} Starting at {time.strftime('%H:%M:%S')}", flush=True)
+        print(f"[Transcriber] Starting at {time.strftime('%H:%M:%S')}", flush=True)
 
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -187,7 +137,7 @@ class Transcriber:
                     elapsed_so_far = now - t0
                     speed_kbps = (total_bytes / 1024) / elapsed_so_far
                     print(
-                        f"{tag} Progress: {audio_pos:.0f}s audio,"
+                        f"[Transcriber] Progress: {audio_pos:.0f}s audio,"
                         f" {total_bytes / 1024 / 1024:.1f} MB received,"
                         f" {speed_kbps:.1f} KB/s,"
                         f" {len(texts)} segments so far",
@@ -226,7 +176,7 @@ class Transcriber:
                     texts.append(marker)
                     silence_marked = True
                     print(
-                        f"{tag} WARNING: {gap_min:.0f}min silence"
+                        f"[Transcriber] WARNING: {gap_min:.0f}min silence"
                         f" after {last_segment_at / 60:.0f}min of audio",
                         flush=True,
                     )
@@ -256,7 +206,7 @@ class Transcriber:
 
         if self._media_duration:
             print(
-                f"{tag} Media duration: {self._media_duration:.0f}s"
+                f"[Transcriber] Media duration: {self._media_duration:.0f}s"
                 f" ({self._media_duration / 60:.1f}min),"
                 f" received: {duration:.0f}s ({duration / 60:.1f}min)",
                 flush=True,
@@ -297,12 +247,12 @@ class Transcriber:
                 f"音频可能已中断或录音设备出现故障。以上内容可能不完整。]"
             )
             print(
-                f"{tag} WARNING: audio ended with {gap_min:.0f}min"
+                f"[Transcriber] WARNING: audio ended with {gap_min:.0f}min"
                 f" of silence after {last_segment_at / 60:.0f}min",
                 flush=True,
             )
         print(
-            f"{tag} Done at {time.strftime('%H:%M:%S')}:"
+            f"[Transcriber] Done at {time.strftime('%H:%M:%S')}:"
             f" {duration:.0f}s audio, {total_bytes / 1024 / 1024:.1f} MB,"
             f" avg {speed_kbps:.1f} KB/s,"
             f" {len(transcript)} chars, {len(texts)} segments in {elapsed:.0f}s",
@@ -311,14 +261,14 @@ class Transcriber:
         self._last_transcript = transcript
         return transcript
 
-    def transcribe_video(self, video_path: str, label: str = "") -> str:
+    def transcribe_video(self, video_path: str) -> str:
         """Transcribe a local video file via ffmpeg pipe."""
         cmd = [
             "ffmpeg", "-i", video_path,
             "-ar", "16000", "-ac", "1",
             "-f", "f32le", "-",
         ]
-        return self._transcribe_from_cmd(cmd, label=label)
+        return self._transcribe_from_cmd(cmd)
 
     @staticmethod
     def probe_duration(url: str, http_headers: str | None = None,
@@ -343,8 +293,7 @@ class Transcriber:
         return None
 
     def transcribe_url(self, url: str, timeout: int = 7200,
-                       http_headers: str | None = None,
-                       label: str = "") -> str:
+                       http_headers: str | None = None) -> str:
         """Stream audio directly from a URL (no video download needed).
 
         Args:
@@ -352,8 +301,6 @@ class Transcriber:
             timeout: Max seconds before killing the process.
             http_headers: ffmpeg-compatible HTTP headers string,
                           e.g. "Cookie: x=y\\r\\nUser-Agent: z\\r\\n"
-            label: Short identifier included in log output so that
-                   concurrent transcriptions can be distinguished.
 
         Raises:
             IncompleteAudioError: If received audio is < 90% of the media's
@@ -371,8 +318,7 @@ class Transcriber:
             "-ar", "16000", "-ac", "1",
             "-f", "f32le", "-",
         ]
-        transcript = self._transcribe_from_cmd(cmd, timeout=timeout,
-                                               label=label)
+        transcript = self._transcribe_from_cmd(cmd, timeout=timeout)
 
         # Check completeness using duration parsed from ffmpeg stderr
         if self._media_duration and self._media_duration > 0:

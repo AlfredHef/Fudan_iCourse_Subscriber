@@ -57,9 +57,6 @@ SENSEVOICE_MODEL_DIR = os.environ.get(
 )
 SILERO_VAD_PATH = os.environ.get("SILERO_VAD_PATH", "silero_vad.onnx")
 
-# Concurrency
-MAX_WORKERS = max(1, int(os.environ.get("MAX_WORKERS", "4")))
-
 # 监控的课程 ID 列表
 COURSE_IDS = [
     c.strip()

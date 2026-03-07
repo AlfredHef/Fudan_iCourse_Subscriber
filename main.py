@@ -2,14 +2,10 @@
 
 Runs a single check: login → detect new lectures → stream audio → transcribe
 → summarize → email. Designed to be triggered by GitHub Actions cron.
-
-Lectures are processed concurrently (controlled by MAX_WORKERS).
 """
 
-import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src import config
 from src.database import Database
@@ -20,46 +16,8 @@ from src.transcriber import IncompleteAudioError, NoAudioStreamError, Transcribe
 from src.webvpn import WebVPNSession
 
 
-class _SessionManager:
-    """Thread-safe wrapper around ``ICourseClient``.
-
-    * ``ensure_alive()`` uses double-checked locking so that only one thread
-      performs re-login when the WebVPN session expires.
-    * After a successful re-login every thread that calls ``ensure_alive()``
-      will transparently receive the new client.
-    """
-
-    def __init__(self, client: ICourseClient):
-        self._client = client
-        self._lock = threading.Lock()
-
-    @property
-    def client(self) -> ICourseClient:
-        """Current client instance (may be stale — prefer ``ensure_alive()``)."""
-        return self._client
-
-    def ensure_alive(self) -> ICourseClient:
-        """Return a live client, re-logging in if the session has expired.
-
-        Fast path (no lock): if the current client is alive, return it
-        immediately.  Slow path: acquire the lock, re-check (another thread
-        may have already refreshed), and re-login if still necessary.
-        """
-        client = self._client
-        if client.check_alive():
-            return client
-        with self._lock:
-            # Another thread may have refreshed while we were waiting.
-            if self._client.check_alive():
-                return self._client
-            print("[Session] WebVPN session expired, re-logging in...")
-            vpn = login_with_retry()
-            self._client = ICourseClient(vpn)
-            return self._client
-
-
 def process_lecture(
-    session: _SessionManager,
+    client: ICourseClient,
     db: Database,
     transcriber: Transcriber,
     summarizer: Summarizer,
@@ -78,11 +36,8 @@ def process_lecture(
     sub_title = lecture.get("sub_title", sub_id)
     date = lecture.get("date", "")
 
-    # Tag prefixed to every log line so concurrent output stays readable.
-    tag = f"[{sub_title}]"
-
-    print(f"\n  {tag} Processing started ({date})")
-    print(f"  {tag} Start: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n  -- Processing: {sub_title} ({date})")
+    print(f"    [Time] Start: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     t_start = time.time()
 
     # Check existing progress for stage-skipping
@@ -92,78 +47,76 @@ def process_lecture(
 
     # 1) Transcribe (stream audio directly from CDN — no video download)
     if has_transcript:
-        print(f"  {tag} Transcript exists ({len(existing['transcript'])} chars), skipping transcription.")
+        print(f"    Transcript exists ({len(existing['transcript'])} chars), skipping transcription.")
         transcript = existing["transcript"]
     else:
-        print(f"  {tag} Fetching video URL at {time.strftime('%H:%M:%S')}")
-        client = session.ensure_alive()
+        print(f"    [Time] Fetching video URL at {time.strftime('%H:%M:%S')}")
         video_url = client.get_video_url(course_id, sub_id)
         if not video_url:
-            print(f"  {tag} No video URL, skipping.")
+            print(f"    No video URL for {sub_id}, skipping.")
             return None
 
         vpn_url, http_headers = client.get_stream_params(video_url)
-        print(f"  {tag} Streaming audio at {time.strftime('%H:%M:%S')}")
-        print(f"  {tag} URL: {vpn_url[:100]}...")
+        print(f"    [Time] Streaming audio at {time.strftime('%H:%M:%S')}")
+        print(f"    [URL] {vpn_url[:100]}...")
 
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
                 transcript = transcriber.transcribe_url(
                     vpn_url, http_headers=http_headers,
-                    label=sub_title,
                 )
                 db.update_transcript(sub_id, transcript)
                 break
             except IncompleteAudioError as e:
-                print(f"  {tag} [WARN] Attempt {attempt}/{max_attempts}: {e}")
+                print(f"    [WARN] Attempt {attempt}/{max_attempts}: {e}")
                 if attempt < max_attempts:
                     # Re-login and get fresh URL for retry
-                    client = session.ensure_alive()
+                    client = _check_session(client)
                     video_url = client.get_video_url(course_id, sub_id)
                     vpn_url, http_headers = client.get_stream_params(video_url)
-                    print(f"  {tag} Retrying with fresh connection...")
+                    print(f"    Retrying with fresh connection...")
                 else:
-                    print(f"  {tag} [FAIL] All {max_attempts} attempts got incomplete audio, using best result.")
+                    print(f"    [FAIL] All {max_attempts} attempts got incomplete audio, using best result.")
                     # Use the partial transcript rather than failing entirely
-                    transcript = transcriber.last_transcript
+                    transcript = transcriber._last_transcript
                     db.update_transcript(sub_id, transcript)
             except NoAudioStreamError as e:
-                print(f"  {tag} [SKIP] Video-only (no audio stream): {e}")
+                print(f"    [SKIP] Video-only (no audio stream): {e}")
                 db.update_error(sub_id, "transcribe", str(e))
                 db.mark_processed(sub_id)
                 return None
             except Exception as e:
-                print(f"  {tag} [FAIL] Transcription error: {type(e).__name__}: {e}")
+                print(f"    [FAIL] Transcription error: {type(e).__name__}: {e}")
                 db.update_error(sub_id, "transcribe", str(e))
                 raise
 
     # 2) Summarize
     if not transcript.strip():
-        print(f"  {tag} Empty transcript, skipping summary.")
+        print(f"    Empty transcript, skipping summary.")
         db.mark_processed(sub_id)
         db.clear_error(sub_id)
         return None
 
     if has_summary:
-        print(f"  {tag} Summary exists ({len(existing['summary'])} chars), skipping summarization.")
+        print(f"    Summary exists ({len(existing['summary'])} chars), skipping summarization.")
         summary = existing["summary"]
     else:
         try:
-            print(f"  {tag} Generating summary at {time.strftime('%H:%M:%S')}")
-            print(f"  {tag} Transcript length: {len(transcript)} chars")
+            print(f"    [Time] Generating summary at {time.strftime('%H:%M:%S')}")
+            print(f"    Transcript length: {len(transcript)} chars")
             summary, model_used = summarizer.summarize(course_title, transcript)
-            print(f"  {tag} [OK] Summary by {model_used}: {len(summary)} chars")
+            print(f"    [OK] Summary by {model_used}: {len(summary)} chars")
             db.update_summary_with_model(sub_id, summary, model_used)
         except Exception as e:
-            print(f"  {tag} [FAIL] Summarization error: {type(e).__name__}: {e}")
+            print(f"    [FAIL] Summarization error: {type(e).__name__}: {e}")
             db.update_error(sub_id, "summarize", str(e))
             raise
 
     db.mark_processed(sub_id)
     db.clear_error(sub_id)
     elapsed = time.time() - t_start
-    print(f"  {tag} Done at {time.strftime('%H:%M:%S')} (total {elapsed:.0f}s)")
+    print(f"    [Time] Done at {time.strftime('%H:%M:%S')}: {sub_title} (total {elapsed:.0f}s)")
     return summary
 
 
@@ -185,17 +138,17 @@ def login_with_retry(max_attempts: int = 5) -> WebVPNSession:
                 raise
 
 
+def _check_session(client: ICourseClient) -> ICourseClient:
+    """Verify WebVPN session; re-login if expired. Returns (possibly new) client."""
+    if client.check_alive():
+        return client
+    print("[Session] WebVPN session expired, re-logging in...")
+    vpn = login_with_retry()
+    return ICourseClient(vpn)
+
+
 def run():
-    """Single execution of the full pipeline.
-
-    Phase 1 – **collect**: iterate every monitored course, identify new or
-    previously-failed lectures, and insert them into the database.
-
-    Phase 2 – **process**: feed the collected lectures into a
-    ``ThreadPoolExecutor`` so that transcription, summarisation, and
-    CDN-signed downloads happen concurrently.  Session expiry is handled
-    transparently by ``_SessionManager.ensure_alive()``.
-    """
+    """Single execution of the full pipeline."""
     print("=" * 60)
     print("iCourse Subscriber — starting run")
     print("=" * 60)
@@ -211,18 +164,15 @@ def run():
 
     vpn = login_with_retry()
     client = ICourseClient(vpn)
-    session = _SessionManager(client)
-
-    # ── Phase 1: Collect all pending lectures across all courses ─────────
-    all_tasks: list[dict] = []
+    email_items = []
 
     for course_id in config.COURSE_IDS:
         try:
             print(f"\n{'─' * 50}")
             print(f"[Course] {course_id}")
 
-            session.ensure_alive()
-            detail = session.client.get_course_detail(course_id)
+            client = _check_session(client)
+            detail = client.get_course_detail(course_id)
             course_title = detail["title"]
             teacher = detail["teacher"]
             lectures = detail["lectures"]
@@ -240,8 +190,8 @@ def run():
                 and str(lec["sub_id"]) not in known_processed
             ]
             # Deduplicate by sub_title (school system sometimes lists duplicates)
-            seen_titles: set[str] = set()
-            deduped: list[dict] = []
+            seen_titles = set()
+            deduped = []
             for lec in new_lectures:
                 title = lec.get("sub_title", "")
                 if title in seen_titles:
@@ -274,45 +224,16 @@ def run():
                     lecture.get("sub_title", ""),
                     lecture.get("date", ""),
                 )
-                all_tasks.append({
-                    "course_id": course_id,
-                    "course_title": course_title,
-                    "lecture": lecture,
-                })
-
-        except Exception:
-            print(f"  ERROR processing course {course_id}:")
-            traceback.print_exc()
-
-    # ── Phase 2: Process lectures concurrently ───────────────────────────
-    email_items: list[dict] = []
-
-    if all_tasks:
-        max_workers = min(config.MAX_WORKERS, len(all_tasks))
-        print(f"\n{'=' * 60}")
-        print(f"[Concurrent] Processing {len(all_tasks)} lecture(s)"
-              f" with {max_workers} worker(s)")
-        print(f"{'=' * 60}")
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    process_lecture,
-                    session, db, transcriber, summarizer,
-                    task["course_id"], task["course_title"], task["lecture"],
-                ): task
-                for task in all_tasks
-            }
-            for future in as_completed(futures):
-                task = futures[future]
-                lecture = task["lecture"]
-                sub_id = str(lecture["sub_id"])
+                client = _check_session(client)
                 try:
-                    summary = future.result()
+                    summary = process_lecture(
+                        client, db, transcriber, summarizer,
+                        course_id, course_title, lecture,
+                    )
                     if summary:
                         email_items.append({
                             "sub_id": sub_id,
-                            "course_title": task["course_title"],
+                            "course_title": course_title,
                             "sub_title": lecture.get("sub_title", sub_id),
                             "date": lecture.get("date", ""),
                             "summary": summary,
@@ -320,8 +241,10 @@ def run():
                 except Exception:
                     print(f"    ERROR processing {sub_id}:")
                     traceback.print_exc()
-    else:
-        print("\nNo new lectures to process.")
+
+        except Exception:
+            print(f"  ERROR processing course {course_id}:")
+            traceback.print_exc()
 
     # Recover any previously processed-but-unsent lectures
     unsent = db.get_unsent_lectures()
@@ -337,9 +260,6 @@ def run():
                     "summary": row["summary"],
                 })
         print(f"[Email] Including {len(unsent)} previously unsent lecture(s).")
-
-    # Sort by course then date for correct email grouping and chronological order
-    email_items.sort(key=lambda x: (x.get("course_title", ""), x.get("date", "")))
 
     # Send one email with all summaries
     if emailer and email_items:

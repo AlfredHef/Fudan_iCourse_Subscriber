@@ -60,6 +60,13 @@ class Transcriber:
     def _media_duration(self, value):
         self._local.media_duration = value
 
+    @property
+    def last_transcript(self):
+        """Public access to the transcript from the most recent transcription
+        on the *current* thread.  Used as a fallback when all retry attempts
+        for incomplete audio fail."""
+        return self._last_transcript
+
     # -- initialisation ---------------------------------------------------
 
     def _init(self):

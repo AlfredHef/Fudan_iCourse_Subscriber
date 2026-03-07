@@ -126,7 +126,7 @@ def process_lecture(
                 else:
                     print(f"  {tag} [FAIL] All {max_attempts} attempts got incomplete audio, using best result.")
                     # Use the partial transcript rather than failing entirely
-                    transcript = transcriber._last_transcript
+                    transcript = transcriber.last_transcript
                     db.update_transcript(sub_id, transcript)
             except NoAudioStreamError as e:
                 print(f"  {tag} [SKIP] Video-only (no audio stream): {e}")

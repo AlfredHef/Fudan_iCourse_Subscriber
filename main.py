@@ -182,6 +182,22 @@ def run():
 
             db.upsert_course(course_id, course_title, teacher)
 
+            # Deduplicate by sub_title on the full lecture list first
+            # (school system sometimes lists duplicates; doing this on the raw list
+            # ensures consistent dedup across runs, not just for pending lectures)
+            seen_sub_titles: set[str] = set()
+            deduped_lectures = []
+            for lec in lectures:
+                title = lec.get("sub_title", "")
+                if title and title in seen_sub_titles:
+                    print(f"  [Dedup] Skipping duplicate: {title}"
+                          f" (sub_id={lec['sub_id']})")
+                    continue
+                if title:
+                    seen_sub_titles.add(title)
+                deduped_lectures.append(lec)
+            lectures = deduped_lectures
+
             # Find new lectures with playback + previously failed (unprocessed) ones
             known_processed = db.get_processed_sub_ids(course_id)
             new_lectures = [
@@ -189,18 +205,6 @@ def run():
                 if lec.get("has_playback")
                 and str(lec["sub_id"]) not in known_processed
             ]
-            # Deduplicate by sub_title (school system sometimes lists duplicates)
-            seen_titles = set()
-            deduped = []
-            for lec in new_lectures:
-                title = lec.get("sub_title", "")
-                if title in seen_titles:
-                    print(f"  [Dedup] Skipping duplicate: {title}"
-                          f" (sub_id={lec['sub_id']})")
-                    continue
-                seen_titles.add(title)
-                deduped.append(lec)
-            new_lectures = deduped
             # Also retry any previously inserted but unprocessed
             unprocessed = db.get_unprocessed_lectures(course_id)
             new_ids = {str(lec["sub_id"]) for lec in new_lectures}

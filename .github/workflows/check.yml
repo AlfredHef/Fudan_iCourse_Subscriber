@@ -181,6 +181,12 @@ jobs:
           unset SECRETS_CONTEXT
           python -u main.py
 
+      - name: Save summaries to server
+        if: always()
+        env:
+          SUMMARY_SSH_PRIVATE_KEY: ${{ secrets.SUMMARY_SSH_PRIVATE_KEY }}
+        run: bash scripts/upload_email_records.sh
+
       - name: Deploy database to data branch
         if: always()
         env:

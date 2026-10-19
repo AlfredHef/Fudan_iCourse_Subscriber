@@ -23,7 +23,7 @@ def check_models(providers: list[dict], client_factory) -> str:
                 if not result.choices:
                     raise ValueError("No completion choices returned")
             except Exception as error:
-                print(f"Model check failed: {name} ({type(error).__name__})", flush=True)
+                print(f"Model check failed: {name} ({type(error).__name__}): {error}", flush=True)
                 continue
             print(f"Model accepted a test request: {name}", flush=True)
             return name

@@ -43,7 +43,7 @@
 | `SMTP_PASSWORD` | ✅ | QQ 邮箱 SMTP **授权码**（不是登录密码） | `abcdefghijklmnop` |
 | `RECEIVER_EMAIL` | ✅ | 接收摘要邮件的邮箱 | `you@m.fudan.edu.com` |
 
-> 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试。自定义供应商时，在 `src/runtime/config.py` 配置供应商，并在 `check.yml` 和 `single_run.yml` 的 Run 步骤中显式添加对应的 Secret 环境变量；不要传入整个 `secrets` 上下文。三个内置供应商支持可选的 `DASHSCOPE_BASE_URL`、`DEEPSEEK_BASE_URL`、`GEMINI_BASE_URL` Secrets。
+> 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试。自定义供应商时，在 `src/runtime/config.py` 配置供应商，并在 `check.yml` 和 `single_run.yml` 的 Verify model providers 和 Run 步骤中显式添加对应的 Secret 环境变量；不要传入整个 `secrets` 上下文。三个内置供应商支持可选的 `DASHSCOPE_BASE_URL`、`DEEPSEEK_BASE_URL`、`GEMINI_BASE_URL` Secrets。
 
 ### 第 3 步：获取课程 ID
 
@@ -92,7 +92,7 @@
 
 工作流只向各步骤提供所需的命名密钥；GitHub Actions 固定到完整提交 SHA。若 GitHub 显示工作流可能有恶意内容，应审核该次运行对应的提交，再由有写入权限的维护者通过已登录的 GitHub 网页批准。不要批准已被修复版本替代的旧运行。
 
-每次检查或单次运行会先发送一个很短的模型测试请求；若所有配置的模型均不可用，立即停止，避免处理完录播后才发现无法生成摘要。ModelScope 默认模型为 `deepseek-ai/DeepSeek-V4.1-Flash`，回退到 `Qwen/Qwen3.5-397B-A17B`；模型路由可用性以该次运行的测试结果为准。
+每次有课程订阅的检查或单次运行会先发送一个很短的模型测试请求；若所有配置的模型均不可用，立即停止，避免处理完录播后才发现无法生成摘要。ModelScope 默认模型为 `Qwen/Qwen3.5-397B-A17B`，回退到 `Qwen/Qwen3.5-35B-A3B`；模型路由可用性以该次运行的测试结果为准。若接口返回 403 并要求验证邮箱，请登录该 Token 所属的 ModelScope 账号，在 `https://modelscope.cn/my/settings/account` 完成验证后重试。
 
 ## 前端页面（索引与查看）
 

@@ -30,16 +30,18 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Cache Python packages
         id: cache-pip
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.pythonLocation }}/lib/python*/site-packages
           key: pip-${{ hashFiles('requirements.txt') }}
@@ -128,8 +130,9 @@ jobs:
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
           EXPORT_COURSE_ID: ${{ inputs.course_id }}
           EXPORT_SUB_IDS: ${{ inputs.sub_ids }}
+          EXPORT_TYPE: ${{ inputs.export_type }}
         run: |
-          case "${{ inputs.export_type }}" in
+          case "$EXPORT_TYPE" in
             "HTML")
               EXPORT_FLAG=""
               ;;
@@ -138,6 +141,10 @@ jobs:
               ;;
             "Markdown")
               EXPORT_FLAG="--md"
+              ;;
+            *)
+              echo "::error::Unsupported export type."
+              exit 1
               ;;
           esac
           if [ -n "$EXPORT_SUB_IDS" ]; then

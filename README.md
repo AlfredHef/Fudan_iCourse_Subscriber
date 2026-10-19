@@ -43,7 +43,7 @@
 | `SMTP_PASSWORD` | ✅ | QQ 邮箱 SMTP **授权码**（不是登录密码） | `abcdefghijklmnop` |
 | `RECEIVER_EMAIL` | ✅ | 接收摘要邮件的邮箱 | `you@m.fudan.edu.com` |
 
-> 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试。如果需要选择其他的LLM供应商，可以在`src\runtime\config.py`路径下自定义供应商。
+> 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试。自定义供应商时，在 `src/runtime/config.py` 配置供应商，并在 `check.yml` 和 `single_run.yml` 的 Run 步骤中显式添加对应的 Secret 环境变量；不要传入整个 `secrets` 上下文。三个内置供应商支持可选的 `DASHSCOPE_BASE_URL`、`DEEPSEEK_BASE_URL`、`GEMINI_BASE_URL` Secrets。
 
 ### 第 3 步：获取课程 ID
 
@@ -82,7 +82,15 @@
 
 定时检查和手动单次运行会在原有摘要邮件之外，把已生成的课程总结同步到服务器 `/home/ubuntu/email-record/`。每个课次保存为一个 Markdown 文件，文件名由课次 ID 确定；重复运行会更新同一文件，也会补齐此前已总结的课次。邮件投递和服务器同步互不依赖。
 
-同步使用仓库 Secret `SUMMARY_SSH_PRIVATE_KEY` 中的专用 SSH 密钥。服务器端将该密钥限制为只能通过 rsync 写入 `email-record` 目录；请勿将私钥写入仓库文件。上传失败会使对应 Action 步骤失败，下次运行会重新同步全部已保存的总结。
+同步使用仓库 Secret `SUMMARY_SSH_PRIVATE_KEY` 中的专用 SSH 密钥。服务器端应将该密钥限制为只能通过 rsync 写入 `email-record` 目录；请勿将私钥写入仓库文件。上传失败会使对应 Action 步骤失败，下次运行会重新同步全部已保存的总结。
+
+上传目标固定为此 Fork 所有者的 `ubuntu@124.222.232.239`，服务器公钥固定在 `.github/record-server-known-hosts`。复用此 Fork 时必须核对自己的目标和服务器公钥，并在服务器端独立确认专用密钥的目录及命令限制。上传脚本在写入临时密钥后会清除密钥环境变量，上传步骤最多运行 10 分钟。
+
+### 工作流安全与恢复
+
+检查、单次运行和删除共用 `icourse-data` 并发组，避免删除被旧任务写回。数据库必须完整恢复并通过校验后，才能运行摘要备份和数据库保存；网络错误、错误密码、损坏或缺失分片都会终止恢复，保留远端数据库。仅在远端确实不存在 `data` 分支时允许首次初始化。
+
+工作流只向各步骤提供所需的命名密钥；GitHub Actions 固定到完整提交 SHA。若 GitHub 显示工作流可能有恶意内容，应审核该次运行对应的提交，再由有写入权限的维护者通过已登录的 GitHub 网页批准。不要批准已被修复版本替代的旧运行。
 
 ## 前端页面（索引与查看）
 

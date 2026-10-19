@@ -16,22 +16,28 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: icourse-data
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Cache Python packages
         id: cache-pip
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.pythonLocation }}/lib/python*/site-packages
           key: pip-${{ hashFiles('requirements.txt') }}
@@ -48,7 +54,7 @@ jobs:
 
       - name: Cache ASR models
         id: cache-models
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/
@@ -64,88 +70,18 @@ jobs:
           wget -q https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
 
       - name: Cache RapidOCR models
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/rapidocr
           key: rapidocr-onnx-default-v1
 
-      - name: Fetch database from data branch
-        run: |
-          mkdir -p data
-          git fetch --depth=1 origin "+refs/heads/data:refs/remotes/origin/data" 2>/dev/null \
-            || { echo "No data branch, starting fresh."; exit 0; }
-          git ls-tree origin/data --name-only data/ | grep -q . \
-            || { echo "No database found on data branch, starting fresh."; exit 0; }
-          if git cat-file -e origin/data:data/icourse-index.enc 2>/dev/null; then
-            mkdir -p data/sharded/shards
-            git show origin/data:data/icourse-index.enc > data/sharded/icourse-index.enc
-            shard_paths=$(git ls-tree -r --name-only origin/data | grep '^data/shards/' || true)
-            for path in $shard_paths; do
-              base=$(basename "$path")
-              git show "origin/data:$path" > "data/sharded/shards/$base"
-            done
-            echo "Loaded $(ls data/sharded/shards 2>/dev/null | wc -l) shard(s)."
-          elif git cat-file -e origin/data:data/icourse.db.gz.enc 2>/dev/null; then
-            git show origin/data:data/icourse.db.gz.enc > data/icourse.db.gz.enc
-            echo "Loaded legacy compressed database."
-          elif git cat-file -e origin/data:data/icourse.db.enc 2>/dev/null; then
-            git show origin/data:data/icourse.db.enc > data/icourse.db.enc
-            echo "Loaded legacy uncompressed database."
-          else
-            echo "No database found on data branch, starting fresh."
-          fi
-
-      - name: Decode database
-        if: hashFiles('data/sharded/icourse-index.enc', 'data/icourse.db.gz.enc', 'data/icourse.db.enc') != ''
+      - name: Restore database from data branch
         env:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-        run: |
-          if [ -f data/sharded/icourse-index.enc ]; then
-            python scripts/db_shard.py reassemble data/sharded data/icourse.db
-            echo "Reassembled sharded database."
-            exit 0
-          fi
-
-          NEW_KEY=$(printf '%s' "ICSv2:${STUID}:${UISPSW}" | sha256sum | cut -d' ' -f1)
-          LEGACY_KEY="${STUID}${UISPSW}${DASHSCOPE_API_KEY}${SMTP_PASSWORD}"
-
-          decrypt_blob() {
-            local in_path="$1"
-            local out_path="$2"
-            if openssl enc -aes-256-cbc -d -pbkdf2 -iter 100000 \
-                 -in "$in_path" -out "$out_path" \
-                 -pass pass:"$NEW_KEY" 2>/dev/null; then
-              echo "v2"
-              return 0
-            fi
-            if openssl enc -aes-256-cbc -d -pbkdf2 \
-                 -in "$in_path" -out "$out_path" \
-                 -pass pass:"$LEGACY_KEY" 2>/dev/null; then
-              echo "legacy"
-              return 0
-            fi
-            return 1
-          }
-
-          if [ -f data/icourse.db.gz.enc ]; then
-            if VER=$(decrypt_blob data/icourse.db.gz.enc data/icourse.db.gz); then
-              gzip -d data/icourse.db.gz
-              echo "Legacy compressed DB decrypted ($VER)."
-            else
-              echo "::warning::Decryption failed (both keys). Starting with fresh database."
-              rm -f data/icourse.db data/icourse.db.gz
-            fi
-          elif [ -f data/icourse.db.enc ]; then
-            if VER=$(decrypt_blob data/icourse.db.enc data/icourse.db); then
-              echo "Legacy uncompressed DB decrypted ($VER)."
-            else
-              echo "::warning::Decryption failed (both keys). Starting with fresh database."
-              rm -f data/icourse.db
-            fi
-          fi
+        run: python scripts/restore_database.py --allow-empty
 
       - name: Record database state
         id: db-before
@@ -166,24 +102,23 @@ jobs:
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-          # All secrets, JSON-encoded. provider_env.py exports only the
-          # vars named by config.MODEL_PROVIDERS (api_key_env /
-          # base_url_env), so user-defined providers with custom env-var
-          # names work without editing this workflow.
-          SECRETS_CONTEXT: ${{ toJSON(secrets) }}
-        run: |
-          eval "$(python scripts/provider_env.py)"
-          unset SECRETS_CONTEXT
-          python -u main.py
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          DASHSCOPE_BASE_URL: ${{ secrets.DASHSCOPE_BASE_URL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
+        run: python -u main.py
 
       - name: Save summaries to server
-        if: always()
+        if: always() && steps.db-before.outcome == 'success'
+        timeout-minutes: 10
         env:
           SUMMARY_SSH_PRIVATE_KEY: ${{ secrets.SUMMARY_SSH_PRIVATE_KEY }}
         run: bash scripts/upload_email_records.sh
 
       - name: Deploy database to data branch
-        if: always()
+        if: always() && steps.db-before.outcome == 'success'
         env:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}

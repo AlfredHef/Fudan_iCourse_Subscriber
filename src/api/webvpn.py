@@ -112,6 +112,28 @@ def get_ordinary_url(vpn_url: str) -> str:
     return original
 
 
+class SchoolLoginActionRequired(RuntimeError):
+    """The school requires an interactive step before it can issue a ticket."""
+
+
+def _login_token(data):
+    if data.get("second") or (data.get("moduleCodes") and not data.get("loginToken")):
+        labels = {
+            "userAndSms": "SMS verification", "sms": "SMS verification",
+            "userAndMail": "email verification", "userAndOtp": "one-time code",
+            "pwdExpRemd": "password expiry reminder", "changePwd": "password change",
+            "userAndPwd": "additional password verification",
+        }
+        modules = data.get("moduleCodes") or []
+        names = [labels.get(m, m if isinstance(m, str) and re.fullmatch(r"[A-Za-z]{1,30}", m)
+                            else "unknown") for m in modules if isinstance(m, str)]
+        raise SchoolLoginActionRequired("School login requires an additional step: " + ", ".join(names or ["unspecified"]))
+    token = data.get("loginToken")
+    if not token:
+        raise RuntimeError("School IDP did not issue a login token")
+    return token
+
+
 class WebVPNSession:
     """Manages a WebVPN session with full IDP authentication."""
 
@@ -299,9 +321,7 @@ class WebVPNSession:
                 f"iCourse CAS auth failed (code={data.get('code')})"
             )
 
-        login_token = data.get("loginToken", "")
-        if not login_token:
-            raise RuntimeError("No loginToken in iCourse CAS response")
+        login_token = _login_token(data)
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -525,9 +545,7 @@ class WebVPNSession:
             )
 
         # loginToken is at top level, not nested under "data"
-        login_token = data.get("loginToken", "")
-        if not login_token:
-            raise RuntimeError("No loginToken in response")
+        login_token = _login_token(data)
 
         print("    loginToken: OK")
         return login_token

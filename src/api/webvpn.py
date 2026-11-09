@@ -117,16 +117,17 @@ class SchoolLoginActionRequired(RuntimeError):
 
 
 def _login_token(data):
-    if data.get("second") or (data.get("moduleCodes") and not data.get("loginToken")):
+    if data.get("second") is True or (data.get("moduleCodes") and not data.get("loginToken")):
         labels = {
             "userAndSms": "SMS verification", "sms": "SMS verification",
             "userAndMail": "email verification", "userAndOtp": "one-time code",
             "pwdExpRemd": "password expiry reminder", "changePwd": "password change",
             "userAndPwd": "additional password verification",
+            "userAndOA": "OA verification", "fidoAssertionAuth": "security key",
+            "identityCard": "ID verification", "qr": "QR code verification",
         }
         modules = data.get("moduleCodes") or []
-        names = [labels.get(m, m if isinstance(m, str) and re.fullmatch(r"[A-Za-z]{1,30}", m)
-                            else "unknown") for m in modules if isinstance(m, str)]
+        names = [labels.get(module, "unknown module") for module in modules if isinstance(module, str)]
         raise SchoolLoginActionRequired("School login requires an additional step: " + ", ".join(names or ["unspecified"]))
     token = data.get("loginToken")
     if not token:
@@ -436,7 +437,6 @@ class WebVPNSession:
                     url = urljoin(url, response.headers["Location"])
                     continue
                 raise RuntimeError(f"WebVPN login context unavailable (HTTP {response.status_code})")
-
 
     def _query_auth_methods(
         self, lck: str, entity_id: str

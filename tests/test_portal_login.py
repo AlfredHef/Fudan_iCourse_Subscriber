@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from src.api.webvpn import WebVPNSession
+from src.api.webvpn import SchoolLoginActionRequired, WebVPNSession, _login_token
 from src.runtime import config
 
 
@@ -77,3 +77,15 @@ class PortalLoginTests(unittest.TestCase):
     def test_authenticated_icourse_skips_cas(self, check_alive):
         self.assertTrue(self.vpn.authenticate_icourse())
         self.get.assert_not_called()
+
+class LoginTokenTests(unittest.TestCase):
+    def test_token_issued(self):
+        self.assertEqual(_login_token({"loginToken": "test", "second": None}), "test")
+
+    def test_second_factor_requires_interaction(self):
+        with self.assertRaisesRegex(SchoolLoginActionRequired, "SMS verification"):
+            _login_token({"second": True, "moduleCodes": ["userAndSms"], "loginToken": None})
+
+    def test_empty_reply_is_not_a_challenge(self):
+        with self.assertRaisesRegex(RuntimeError, "did not issue"):
+            _login_token({})

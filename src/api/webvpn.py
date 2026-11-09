@@ -381,6 +381,7 @@ class WebVPNSession:
         redirects = 0
         # The CAS entry sets the portal cookies and redirects to the school IDP.
         url = portal + "?cas_login=true"
+        retries_left = 2
         while True:
             parsed = urlparse(url)
             if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts
@@ -399,7 +400,15 @@ class WebVPNSession:
                     raise RuntimeError("Invalid WebVPN authentication context")
                 return keys[0], config.WEBVPN_BASE
 
-            with self.session.get(url, allow_redirects=False, timeout=20) as response:
+            try:
+                response = self.session.get(url, allow_redirects=False, timeout=20)
+            except (requests.Timeout, requests.ConnectionError):
+                if not retries_left:
+                    raise RuntimeError(f"WebVPN CAS initialization timed out or lost connection at {parsed.hostname}") from None
+                retries_left -= 1
+                print(f"    Retrying CAS initialization at {parsed.hostname} after a transport failure.")
+                continue
+            with response:
                 if response.is_redirect:
                     redirects += 1
                     if redirects > 8:

@@ -8,9 +8,11 @@ Handles:
 
 import html as html_mod
 import re
+import time
 from binascii import hexlify, unhexlify
 from urllib.parse import urlparse, parse_qs, quote, urljoin
 
+import pyotp
 import requests
 from Crypto.Cipher import AES
 from Crypto.PublicKey import RSA
@@ -133,6 +135,24 @@ def _login_token(data):
     if not token:
         raise RuntimeError("School IDP did not issue a login token")
     return token
+
+
+def _current_otp(setting):
+    try:
+        value = setting.strip()
+        if value.startswith("otpauth://"):
+            generator = pyotp.parse_uri(value)
+        else:
+            generator = pyotp.TOTP("".join(value.split()))
+        if not isinstance(generator, pyotp.TOTP) or not 1 <= generator.interval <= 120:
+            raise ValueError
+        # Leave enough time for the request to reach the IDP.
+        remaining = generator.interval - time.time() % generator.interval
+        if remaining < min(5, generator.interval / 2):
+            time.sleep(remaining)
+        return generator.now()
+    except (ValueError, TypeError, OverflowError, KeyError):
+        raise SchoolLoginActionRequired("Invalid ICOURSE_TOTP_SECRET configuration") from None
 
 
 class WebVPNSession:
@@ -305,24 +325,9 @@ class WebVPNSession:
                 "verifyCode": "",
             },
         }
-        resp = self.session.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{idp_vpn_base}/ac/",
-                "Origin": config.WEBVPN_BASE,
-            },
-            timeout=60,
-        )
-        data = resp.json()
-
-        if str(data.get("code")) != "200":
-            raise RuntimeError(
-                f"iCourse CAS auth failed (code={data.get('code')})"
-            )
-
-        login_token = _login_token(data)
+        login_token = self._submit_authentication(url, payload, {
+            "Referer": f"{idp_vpn_base}/ac/", "Origin": config.WEBVPN_BASE,
+        })
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -527,28 +532,40 @@ class WebVPNSession:
                 "verifyCode": "",
             },
         }
-        resp = self.session.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{config.IDP_BASE}/ac/",
-                "Origin": config.IDP_BASE,
-            },
-            timeout=60,
-        )
-        data = resp.json()
+        return self._submit_authentication(url, payload, {
+            "Referer": f"{config.IDP_BASE}/ac/", "Origin": config.IDP_BASE,
+        })
 
+    def _submit_authentication(self, url, payload, headers):
+        response = self.session.post(url, json=payload, headers=headers, timeout=60)
+        data = response.json()
         if str(data.get("code")) != "200":
-            raise RuntimeError(
-                f"Authentication failed (code={data.get('code')})"
-            )
+            raise RuntimeError(f"Authentication failed (code={data.get('code')})")
+        if data.get("second") is not True or "userAndOtp" not in (data.get("moduleCodes") or []):
+            return _login_token(data)
 
-        # loginToken is at top level, not nested under "data"
-        login_token = _login_token(data)
-
-        print("    loginToken: OK")
-        return login_token
+        if not config.ICOURSE_TOTP_SECRET:
+            raise SchoolLoginActionRequired("Configure ICOURSE_TOTP_SECRET for the offered dynamic password method")
+        if not all(data.get(key) for key in ("requestNumber", "authChainCode", "userName")):
+            raise SchoolLoginActionRequired("School IDP returned an incomplete OTP challenge")
+        continuation = {
+            "entityId": payload["entityId"], "lck": payload["lck"],
+            "requestType": payload["requestType"], "authModuleCode": "userAndOtp",
+            "authChainCode": data["authChainCode"], "requestNumber": data["requestNumber"],
+            "authPara": {"loginName": data["userName"], "otpCode": _current_otp(config.ICOURSE_TOTP_SECRET)},
+        }
+        try:
+            response = self.session.post(url, json=continuation, headers=headers,
+                                         allow_redirects=False, timeout=60)
+            if response.status_code != 200:
+                raise SchoolLoginActionRequired("School OTP endpoint did not confirm the request")
+            result = response.json()
+        except (requests.RequestException, ValueError):
+            raise SchoolLoginActionRequired("School OTP response could not be confirmed") from None
+        if not isinstance(result, dict) or str(result.get("code")) != "200" or not result.get("loginToken") or result.get("second"):
+            raise SchoolLoginActionRequired("School OTP did not complete authentication; check the bound authenticator and seed")
+        print("    School dynamic password accepted.")
+        return result["loginToken"]
 
     def _get_cas_ticket(self, login_token: str) -> str:
         """Step 6: Exchange loginToken for a CAS ticket URL."""

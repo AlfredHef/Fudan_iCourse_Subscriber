@@ -35,6 +35,7 @@
 |---|---|---|---|
 | `STUID` | ✅ | 复旦学号 | `22307110000` |
 | `UISPSW` | ✅ | UIS 统一身份认证密码 | `your_password` |
+| `ICOURSE_TOTP_SECRET` | 动态口令二次认证时需要 | 填入已绑定验证器的 Base32 设置密钥（默认 6 位、30 秒、SHA-1），或完整的 `otpauth://totp/…` 配置串。仅在 GitHub Secret 中保存。 | |
 | `COURSE_IDS` | ✅ | 要监控的课程 ID，多个用英文逗号分隔 | `35472,30251` |
 | `DASHSCOPE_API_KEY` | ⬜ | ModelScope 平台 API Key | `ms-xxxxxxxx` |
 | `DEEPSEEK_API_KEY` | ⬜ | DeepSeek API Key（推荐） | `sk-xxxxxxxx` |

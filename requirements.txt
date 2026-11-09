@@ -9,3 +9,4 @@ psutil
 pygments
 rapidocr-onnxruntime
 imagehash
+pyotp==2.9.0

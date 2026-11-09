@@ -89,3 +89,49 @@ class LoginTokenTests(unittest.TestCase):
     def test_empty_reply_is_not_a_challenge(self):
         with self.assertRaisesRegex(RuntimeError, "did not issue"):
             _login_token({})
+
+
+class TotpContinuationTests(unittest.TestCase):
+    # RFC 6238 Appendix B, SHA-1 at Unix time 59.
+    seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    challenge = {"code": 200, "second": True, "moduleCodes": ["qr", "userAndOtp"],
+                 "requestNumber": "request", "authChainCode": "next", "userName": "student"}
+
+    def test_supported_settings_generate_the_expected_code(self):
+        import datetime
+        from src.api.webvpn import _current_otp
+        with patch("pyotp.totp.datetime.datetime", wraps=datetime.datetime) as dt, patch("src.api.webvpn.time.time", return_value=48):
+            dt.now.return_value = datetime.datetime.fromtimestamp(59)
+            self.assertEqual(_current_otp(self.seed), "287082")
+            self.assertEqual(_current_otp(f"otpauth://totp/test?secret={self.seed}&digits=8"), "94287082")
+
+    def setUp(self):
+        self.vpn = WebVPNSession()
+        self.post = self.vpn.session.post = Mock()
+        self.payload = {"entityId": "service", "lck": "key", "requestType": "chain_type", "authPara": {"password": "encrypted"}}
+        self.headers = {"Origin": "portal"}
+
+    def submit(self, result, seed):
+        self.post.side_effect = [Mock(json=lambda: self.challenge), Mock(status_code=200, json=lambda: result)]
+        with patch.object(config, "ICOURSE_TOTP_SECRET", seed):
+            return self.vpn._submit_authentication("endpoint", self.payload, self.headers)
+
+    @patch("src.api.webvpn._current_otp", return_value="012345")
+    def test_continuation_uses_original_session_and_server_challenge(self, generate):
+        self.assertEqual(self.submit({"code": 200, "loginToken": "token"}, self.seed), "token")
+        self.post.assert_called_with("endpoint", json={
+            "entityId": "service", "lck": "key", "requestType": "chain_type",
+            "authModuleCode": "userAndOtp", "authChainCode": "next", "requestNumber": "request",
+            "authPara": {"loginName": "student", "otpCode": "012345"},
+        }, headers=self.headers, timeout=60, allow_redirects=False)
+
+    def test_missing_seed_stops_before_otp_submission(self):
+        with self.assertRaisesRegex(SchoolLoginActionRequired, "ICOURSE_TOTP_SECRET"):
+            self.submit({}, "")
+        self.assertEqual(self.post.call_count, 1)
+
+    @patch("src.api.webvpn._current_otp", return_value="012345")
+    def test_rejected_otp_stops_without_replay(self, generate):
+        with self.assertRaisesRegex(SchoolLoginActionRequired, "did not complete"):
+            self.submit({"code": 401}, self.seed)
+        self.assertEqual(self.post.call_count, 2)

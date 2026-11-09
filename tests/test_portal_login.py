@@ -40,6 +40,20 @@ class PortalLoginTests(unittest.TestCase):
                     self.vpn._get_auth_context()
                 self.get.assert_called_once()
 
+    def test_retries_transient_cas_entry_timeout(self):
+        self.get.side_effect = [
+            requests.ReadTimeout(),
+            response(302, config.IDP_BASE + "/ac/?entityId=" + config.WEBVPN_BASE + "&lck=key"),
+        ]
+        self.assertEqual(self.vpn._get_auth_context(), ("key", config.WEBVPN_BASE))
+        self.assertEqual(self.get.call_args_list[0], self.get.call_args_list[1])
+
+    def test_stops_after_repeated_timeouts(self):
+        self.get.side_effect = requests.ReadTimeout()
+        with self.assertRaisesRegex(RuntimeError, "webvpn.fudan.edu.cn"):
+            self.vpn._get_auth_context()
+        self.assertEqual(self.get.call_count, 3)
+
     def test_limits_redirect_loop(self):
         self.get.return_value = response(302, "/loop")
         with self.assertRaises(RuntimeError):

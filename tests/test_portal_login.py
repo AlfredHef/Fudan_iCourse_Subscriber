@@ -22,14 +22,14 @@ class PortalLoginTests(unittest.TestCase):
         self.get = Mock()
         self.vpn.session.get = self.get
 
-    def test_initializes_portal_before_cas(self):
+    def test_starts_cas_at_portal_and_follows_relative_redirect(self):
         self.get.side_effect = [
-            response(200), response(302, "/cas"),
+            response(302, "/cas"),
             response(302, config.IDP_BASE + "/ac/#/login?entityId=https%3A%2F%2Fwebvpn.fudan.edu.cn&lck=a%2Bb"),
         ]
         self.assertEqual(self.vpn._get_auth_context(), ("a+b", config.WEBVPN_BASE))
         self.assertEqual([call.args[0] for call in self.get.call_args_list],
-                         [config.WEBVPN_BASE + suffix for suffix in ("/login", "/login?cas_login=true", "/cas")])
+                         [config.WEBVPN_BASE + suffix for suffix in ("/login?cas_login=true", "/cas")])
 
     def test_rejects_foreign_host_and_wrong_context(self):
         for location in ("https://example.org/login", config.IDP_BASE + "/ac/?lck=key&entityId=other"):

@@ -23,6 +23,30 @@ jobs:
           from src.api.webvpn import WebVPNSession
           from src.api.icourse import ICourseClient
           vpn = WebVPNSession()
+          import re
+          from urllib.parse import urlsplit, parse_qs
+          def inspect_response(resp, *args, **kwargs):
+              path = urlsplit(resp.url).path
+              location = resp.headers.get("Location", "")
+              target = urlsplit(location)
+              if location:
+                  route = target.path.split("/")[-1]
+                  if route not in ("login", "authenticate", "index.php", ""):
+                      route = "other"
+                  print("[redirect]", target.hostname, route, "has_context", "lck=" in location)
+              if path.endswith(("/queryAuthMethods", "/authExecute")):
+                  data = resp.json()
+                  def shape(value, depth=0):
+                      if isinstance(value, dict) and depth < 3:
+                          return {k: shape(v,depth+1) for k,v in value.items() if re.fullmatch(r"[a-zA-Z_]{1,40}", k)}
+                      if isinstance(value, list) and value and depth < 3:
+                          return [shape(value[0],depth+1)]
+                      return type(value).__name__
+                  print("[IDP schema]", shape(data))
+                  for key in ("needCaptcha","needMfa","needVerifyCode","secondAuth","authModuleCode","moduleCode","requestType","authResult","status"):
+                      if key in data and str(data[key]) in ("True","False","0","1","userAndPwd","chain_type","success","fail","continue"):
+                          print("[IDP flag]", key, data[key])
+          vpn.session.hooks["response"].append(inspect_response)
           vpn.login()
           vpn.authenticate_icourse()
           if not ICourseClient(vpn).get_userinfo().get("id"):

@@ -1,0 +1,31 @@
+name: Verify iCourse login
+on:
+  push:
+    branches: [verify/icourse-auth-36a1d6d]
+permissions:
+  contents: read
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests pycryptodome
+      - name: Check WebVPN and iCourse user session
+        env:
+          StuId: ${{ secrets.STUID }}
+          UISPsw: ${{ secrets.UISPSW }}
+        run: |
+          python -u - <<'PY'
+          from src.api.webvpn import WebVPNSession
+          from src.api.icourse import ICourseClient
+          vpn = WebVPNSession()
+          vpn.login()
+          vpn.authenticate_icourse()
+          if not ICourseClient(vpn).check_alive():
+              raise SystemExit("iCourse user API verification failed")
+          print("Verified authenticated iCourse user API")
+          PY

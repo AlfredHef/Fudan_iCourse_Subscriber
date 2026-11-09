@@ -1,31 +1,23 @@
-name: Verify iCourse login
+name: Diagnose school login endpoints
 on:
   push:
     branches: [verify/icourse-auth-36a1d6d]
-permissions:
-  contents: read
+permissions: {}
 jobs:
-  login:
+  probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 4
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install requests pycryptodome
-      - name: Check WebVPN and iCourse user session
-        env:
-          StuId: ${{ secrets.STUID }}
-          UISPsw: ${{ secrets.UISPSW }}
+      - name: Measure anonymous endpoint timing
+        shell: bash
         run: |
-          python -u - <<'PY'
-          from src.api.webvpn import WebVPNSession
-          from src.api.icourse import ICourseClient
-          vpn = WebVPNSession()
-          vpn.login()
-          vpn.authenticate_icourse()
-          if not ICourseClient(vpn).check_alive():
-              raise SystemExit("iCourse user API verification failed")
-          print("Verified authenticated iCourse user API")
-          PY
+          probe() {
+            echo "start $1"
+            curl -s -4 --max-time 100 -o /dev/null -w "PROBE $1 status=%{http_code} ip=%{remote_ip} tcp=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer} total=%{time_total}\n" "$2" || true
+          }
+          probe portal https://webvpn.fudan.edu.cn/login &
+          probe cas 'https://webvpn.fudan.edu.cn/login?cas_login=true' &
+          probe root https://webvpn.fudan.edu.cn/ &
+          probe idp 'https://id.fudan.edu.cn/idp/authCenter/authenticate?service=https%3A%2F%2Fwebvpn.fudan.edu.cn%2Flogin%3Fcas_login%3Dtrue' &
+          probe icourse https://icourse.fudan.edu.cn/userapi/v1/infosimple &
+          wait

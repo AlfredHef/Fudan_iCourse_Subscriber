@@ -379,39 +379,35 @@ class WebVPNSession:
         portal = config.WEBVPN_BASE + "/login"
         allowed_hosts = {urlparse(base).hostname for base in (portal, config.IDP_BASE)}
         redirects = 0
-        for entry in (portal, portal + "?cas_login=true"):
-            url = entry
-            while True:
-                parsed = urlparse(url)
-                if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts
-                        or parsed.port not in (None, 443) or parsed.username is not None
-                        or parsed.password is not None):
-                    raise RuntimeError("Unexpected WebVPN authentication redirect")
-                params = parse_qs(parsed.query, keep_blank_values=True)
-                fragment = parse_qs(parsed.fragment.partition("?")[2], keep_blank_values=True)
-                for key, values in fragment.items():
-                    params.setdefault(key, []).extend(values)
-                if "lck" in params or "entityId" in params:
-                    keys = params.get("lck", [])
-                    if (parsed.hostname != urlparse(config.IDP_BASE).hostname
-                            or len(keys) != 1 or not keys[0].strip()
-                            or params.get("entityId") != [config.WEBVPN_BASE]):
-                        raise RuntimeError("Invalid WebVPN authentication context")
-                    return keys[0], config.WEBVPN_BASE
+        # The CAS entry sets the portal cookies and redirects to the school IDP.
+        url = portal + "?cas_login=true"
+        while True:
+            parsed = urlparse(url)
+            if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts
+                    or parsed.port not in (None, 443) or parsed.username is not None
+                    or parsed.password is not None):
+                raise RuntimeError("Unexpected WebVPN authentication redirect")
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            fragment = parse_qs(parsed.fragment.partition("?")[2], keep_blank_values=True)
+            for key, values in fragment.items():
+                params.setdefault(key, []).extend(values)
+            if "lck" in params or "entityId" in params:
+                keys = params.get("lck", [])
+                if (parsed.hostname != urlparse(config.IDP_BASE).hostname
+                        or len(keys) != 1 or not keys[0].strip()
+                        or params.get("entityId") != [config.WEBVPN_BASE]):
+                    raise RuntimeError("Invalid WebVPN authentication context")
+                return keys[0], config.WEBVPN_BASE
 
-                with self.session.get(url, allow_redirects=False, timeout=20) as response:
-                    if response.is_redirect:
-                        redirects += 1
-                        if redirects > 8:
-                            raise RuntimeError("Too many WebVPN authentication redirects")
-                        url = urljoin(url, response.headers["Location"])
-                        continue
-                    if (entry == portal and response.status_code == 200
-                            and parsed.hostname == urlparse(portal).hostname
-                            and parsed.path.rstrip("/") in ("", "/login")):
-                        break
-                    raise RuntimeError(f"WebVPN login context unavailable (HTTP {response.status_code})")
-        raise RuntimeError("WebVPN portal did not supply a CAS login context")
+            with self.session.get(url, allow_redirects=False, timeout=20) as response:
+                if response.is_redirect:
+                    redirects += 1
+                    if redirects > 8:
+                        raise RuntimeError("Too many WebVPN authentication redirects")
+                    url = urljoin(url, response.headers["Location"])
+                    continue
+                raise RuntimeError(f"WebVPN login context unavailable (HTTP {response.status_code})")
+
 
     def _query_auth_methods(
         self, lck: str, entity_id: str

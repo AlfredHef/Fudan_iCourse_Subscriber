@@ -25,7 +25,7 @@ jobs:
           vpn = WebVPNSession()
           vpn.login()
           vpn.authenticate_icourse()
-          if not ICourseClient(vpn).check_alive():
+          if not ICourseClient(vpn).get_userinfo().get("id"):
               raise SystemExit("iCourse user API verification failed")
           print("Verified authenticated iCourse user API")
           PY

@@ -52,7 +52,7 @@
 
 进入 [UIS 个人中心的账号安全页面](https://id.fudan.edu.cn/uc/#/pc/userCenter/accountSecurity)，在「动态口令」中按提示完成绑定，并保存绑定时获取的 **Base32 密钥**，按上述的 Secrets 填入 `ICOURSE_TOTP_SECRET` 即可
 
-![UIS 动态口令绑定页面，箭头所指密钥用于 UIS_TOTP_SECRET](docs/uis-totp.png)
+![UIS 动态口令绑定页面，箭头所指密钥用于 ICOURSE_TOTP_SECRET](docs/uis-totp.png)
 
 
 ### 第 3 步：获取课程 ID

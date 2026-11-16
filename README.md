@@ -46,6 +46,15 @@
 
 > 至少配置一个 LLM API Key（DASHSCOPE、DEEPSEEK 或 GEMINI）。程序按配置顺序自动回退尝试。自定义供应商时，在 `src/runtime/config.py` 配置供应商，并在 `check.yml` 和 `single_run.yml` 的 Verify model providers 和 Run 步骤中显式添加对应的 Secret 环境变量；不要传入整个 `secrets` 上下文。三个内置供应商支持可选的 `DASHSCOPE_BASE_URL`、`DEEPSEEK_BASE_URL`、`GEMINI_BASE_URL` Secrets。
 
+#### 配置动态口令二次验证（TOTP）
+
+> 2026/11/09 iCourse 平台升级了登录策略，要求所有账号在密码验证后进行二次验证（TOTP），我们采用 TOP 登录的方法进行二次验证
+
+进入 [UIS 个人中心的账号安全页面](https://id.fudan.edu.cn/uc/#/pc/userCenter/accountSecurity)，在「动态口令」中按提示完成绑定，并保存绑定时获取的 **Base32 密钥**，按上述的 Secrets 填入 `ICOURSE_TOTP_SECRET` 即可
+
+![UIS 动态口令绑定页面，箭头所指密钥用于 UIS_TOTP_SECRET](docs/uis-totp.png)
+
+
 ### 第 3 步：获取课程 ID
 
 登录 [iCourse 网页版](https://icourse.fudan.edu.cn)，进入你要监控的课程页面，URL 中的数字就是课程 ID：
